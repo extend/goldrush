@@ -78,6 +78,10 @@
     with/2
 ]).
 
+-export([
+    union/1
+]).
+
 -record(module, {
     'query' :: term(),
     tables :: [{atom(), ets:tid()}],
@@ -107,27 +111,49 @@ eq(Key, Term) when is_atom(Key) -> {Key, '=', Term}.
 gt(Key, Term) when is_atom(Key) -> {Key, '>', Term}.
 
 
-%% @doc Apply multiple conditions to the input.
-%% For an event to be considered valid output the condition of all filters
-%% specified in the input must hold for the input event.
+%% @doc Filter the input using multiple filters.
+%%
+%% For an input to be considered valid output the all filters specified
+%% in the list must hold for the input event. The list is expected to
+%% be a non-empty list. If the list of filters is an empty list a `badarg'
+%% error will be thrown.
 -spec all([q()]) -> q().
-all(Conds) when is_list(Conds) ->
-    {all, Conds}.
+all([_|_]=Conds) ->
+    {all, Conds};
+all(Other) ->
+    erlang:error(badarg, [Other]).
 
-%% @doc Apply one of multiple conditions to the input.
+%% @doc Filter the input using one of multiple filters.
+%%
+%% For an input to be considered valid output on of the filters specified
+%% in the list must hold for the input event. The list is expected to be
+%% a non-empty list. If the list of filters is an empty list a `badarg'
+%% error will be thrown.
 -spec any([q()]) -> q().
-any(Conds) when is_list(Conds) ->
-    {any, Conds}.
+any([_|_]=Conds) ->
+    {any, Conds};
+any(Other) ->
+    erlang:error(badarg, [Other]).
+
 
 %% @doc Always return `true' or `false'.
 -spec null(boolean()) -> q().
 null(Result) when is_boolean(Result) ->
     {null, Result}.
 
-%% @doc Apply a function to each output.
+%% @doc Apply a function to each output of a query.
+%%
+%% Updating the output action of a query finalizes it. Attempting
+%% to use a finalized query to construct a new query will result
+%% in a `badarg' error.
 -spec with(q(), fun((gre:event()) -> term())) -> q().
 with(Query, Fun) when is_function(Fun, 1) ->
     {with, Query, Fun}.
+
+%% @doc Return a union of multiple queries.
+-spec union([q()]) -> q().
+union(Queries) ->
+    {union, Queries}.
 
 
 %% @doc Compile a query to a module.
@@ -176,8 +202,8 @@ module_data(Query) ->
     %% tables are referred to by name in the generated code. the table/1
     %% function maps names to tids.
     Tables = [{params,Params}, {counters,Counters}],
-    Tree = query_tree(Query),
-    {ok, #module{'query'=Query, tables=Tables, qtree=Tree}}.
+    Query2 = glc_lib:reduce(Query),
+    {ok, #module{'query'=Query, tables=Tables, qtree=Query2}}.
 
 
 %% @private Map a query to a simplified query tree term.
@@ -208,11 +234,7 @@ module_data(Query) ->
     {atom(), '>', term()} |
     {any, [qcond()]} |
     {all, [qcond()]}.
--type qbody() :: tuple().
--type qtree() :: [{qcond(), qbody()}].
--spec query_tree(term()) -> qtree().
-query_tree(Query) ->
-    Query.
+
 
 %% abstract code geneation functions
 
@@ -256,20 +278,14 @@ abstract_module_(Module, #module{tables=Tables, qtree=Tree}=Data) ->
         abstract_info(Data) ++
         [erl_syntax:clause(
             [erl_syntax:underscore()], none,
-                [erl_syntax:application(
-                 erl_syntax:atom(erlang),
-                 erl_syntax:atom(error),
-                 [erl_syntax:atom(badarg)])])]),
+                [abstract_apply(erlang, error, [erl_syntax:atom(badarg)])])]),
      %% table(Name) -> ets:tid().
      erl_syntax:function(
         erl_syntax:atom(table),
         abstract_tables(Tables) ++
         [erl_syntax:clause(
          [erl_syntax:underscore()], none,
-            [erl_syntax:application(
-             erl_syntax:atom(erlang),
-             erl_syntax:atom(error),
-             [erl_syntax:atom(badarg)])])]),
+            [abstract_apply(erlang, error, [erl_syntax:atom(badarg)])])]),
      %% handle(Event) - entry function
      erl_syntax:function(
        erl_syntax:atom(handle),
@@ -417,9 +433,7 @@ abstract_getkey(Key, OnMatch, OnNomatch, #state{fields=Fields}=State) ->
 abstract_getkey_(Key, OnMatch, OnNomatch, #state{
         event=Event, fields=Fields}=State) ->
     [erl_syntax:case_expr(
-        erl_syntax:application(
-            erl_syntax:atom(gre), erl_syntax:atom(find),
-            [erl_syntax:atom(Key), Event]),
+        abstract_apply(gre, find, [erl_syntax:atom(Key), Event]),
         [erl_syntax:clause([
             erl_syntax:tuple([
                 erl_syntax:atom(true),
@@ -457,12 +471,8 @@ abstract_getparam_(Term, OnBound, #state{paramstab=Table,
     end,
     [erl_syntax:match_expr(
         param_variable(Key),
-        erl_syntax:application(
-            erl_syntax:atom(ets),
-            erl_syntax:atom(lookup_element),
-            [erl_syntax:application(
-                erl_syntax:atom(table),
-                [erl_syntax:atom(params)]),
+        abstract_apply(ets, lookup_element,
+            [abstract_apply(table, [erl_syntax:atom(params)]),
              erl_syntax:abstract(Key),
              erl_syntax:abstract(2)]))
     ] ++ OnBound(State#state{paramvars=[{Term, param_variable(Key)}|Params]}).
@@ -483,12 +493,8 @@ param_variable(Key) ->
 %% @todo Pass state record. Only Generate code if `statistics' is enabled.
 -spec abstract_count(atom()) -> syntaxTree().
 abstract_count(Counter) ->
-    erl_syntax:application(
-        erl_syntax:atom(ets),
-        erl_syntax:atom(update_counter),
-        [erl_syntax:application(
-            erl_syntax:atom(table),
-            [erl_syntax:atom(counters)]),
+    abstract_apply(ets, update_counter,
+        [abstract_apply(table, [erl_syntax:atom(counters)]),
          erl_syntax:abstract(Counter),
          erl_syntax:abstract({2,1})]).
 
@@ -497,12 +503,8 @@ abstract_count(Counter) ->
 %% @todo Pass state record. Only Generate code if `statistics' is enabled.
 -spec abstract_getcount(atom()) -> [syntaxTree()].
 abstract_getcount(Counter) ->
-    [erl_syntax:application(
-        erl_syntax:atom(ets),
-        erl_syntax:atom(lookup_element),
-        [erl_syntax:application(
-            erl_syntax:atom(table),
-            [erl_syntax:atom(counters)]),
+    [abstract_apply(ets, lookup_element,
+        [abstract_apply(table, [erl_syntax:atom(counters)]),
          erl_syntax:abstract(Counter),
          erl_syntax:abstract(2)])].
 
@@ -529,6 +531,21 @@ load_binary(Module, Binary) ->
         {module, Module}  -> {ok, loaded, Module};
         {error, Reason} -> exit({error_loading_module, Module, Reason})
     end.
+
+%% @private Apply an exported function.
+-spec abstract_apply(atom(), atom(), [syntaxTree()]) -> syntaxTree().
+abstract_apply(Module, Function, Arguments) ->
+    erl_syntax:application(
+        erl_syntax:atom(Module),
+        erl_syntax:atom(Function),
+        Arguments).
+
+%% @private Apply a module local function.
+-spec abstract_apply(atom(), [syntaxTree()]) -> syntaxTree().
+abstract_apply(Function, Arguments) ->
+    erl_syntax:application(
+        erl_syntax:atom(Function),
+        Arguments).
 
 
 -ifdef(TEST).
@@ -652,6 +669,11 @@ with_function_test() ->
     glc:handle(Mod, gre:make([{a,1}], [list])),
     ?assertEqual(1, Mod:info(output)),
     ?assertEqual(1, receive Msg -> Msg after 0 -> notcalled end),
+    done.
+
+union_single_test() ->
+    {compiled, _Mod} = setup_query(testmod13,
+        glc:union([glc:eq(a, 1)])),
     done.
 
 -endif.

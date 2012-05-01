@@ -16,8 +16,19 @@
 -module(glc_lib).
 
 -export([
-    reduce/1
+    reduce/1,
+    matches/2,
+    onoutput/1,
+    onoutput/2
 ]).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-undef(LET).
+-ifdef(PROPER).
+-include_lib("proper/include/proper.hrl").
+-endif.
+-endif.
 
 %% @doc Return a reduced version of a query.
 %% 
@@ -26,21 +37,64 @@
 %% from this function is functionally equivalent to the original.
 reduce(Query) ->
     repeat(Query, fun(Q0) ->
-        Q1 = flatten(Q0),
+        Q1 = repeat(Q0, fun flatten/1),
         Q2 = required(Q1),
-        Q3 = flatten(Q2),
+        Q3 = repeat(Q2, fun flatten/1),
         Q4 = common(Q3),
-        Q4
+        Q5 = repeat(Q4, fun flatten/1),
+        Q6 = constants(Q5),
+        Q6
     end).
 
+
+%% @doc Test if an event matches a query.
+%% This function is only intended to be used for testing purposes.
+matches({any, Conds}, Event) ->
+    lists:any(fun(Cond) -> matches(Cond, Event) end, Conds);
+matches({all, Conds}, Event) ->
+    lists:all(fun(Cond) -> matches(Cond, Event) end, Conds);
+matches({null, Const}, _Event) ->
+    Const;
+matches({Key, '<', Term}, Event) ->
+    case gre:find(Key, Event) of
+        {true, Term2} -> Term2 < Term;
+        false -> false
+    end;
+matches({Key, '=', Term}, Event) ->
+    case gre:find(Key, Event) of
+        {true, Term2} -> Term2 =:= Term;
+        false -> false
+    end;
+matches({Key, '>', Term}, Event) ->
+    case gre:find(Key, Event) of
+        {true, Term2} -> Term2 > Term;
+        false -> false
+    end.
+
 %% @private Repeatedly apply a function to a query.
-%% This is used for query transformation functions 
-%% applied multiple times 
+%% This is used for query transformation functions that must be applied
+%% multiple times to yield the simplest possible version of a query.
 repeat(Query, Fun) ->
     case Fun(Query) of
         Query -> Query;
         Query2 -> repeat(Query2, Fun)
     end.
+
+
+%% @doc Return the output action of a query.
+onoutput({_, '<', _}) ->
+    output;
+onoutput({_, '=', _}) ->
+    output;
+onoutput({_, '>', _}) ->
+    output;
+onoutput(Query) ->
+    erlang:error(badarg, [Query]).
+
+%% @doc Modify the output action of a query.
+onoutput(Action, Query) ->
+    erlang:error(badarg, [Action, Query]).
+
 
 %% @private Flatten a condition tree.
 flatten({all, [Cond]}) ->
@@ -54,29 +108,23 @@ flatten({any, [_|_]=Conds}) ->
 flatten({with, Cond, Action}) ->
     {with, flatten(Cond), Action};
 flatten(Other) ->
-    return_valid(Other).
+    valid(Other).
 
 
 %% @private Flatten and remove duplicate members of an "all" filter.
 flatten_all(Conds) ->
-    {all, lists:usort(flatten_all_(Conds))}.
-
-flatten_all_([{all, Conds}|T]) ->
-    Conds ++ flatten_all_(T);
-flatten_all_([H|T]) ->
-    [H|flatten_all_(T)];
-flatten_all_([]) ->
-    [].
+    {all, lists:usort(flatten_tag(all, Conds))}.
 
 %% @private Flatten and remove duplicate members of an "any" filter.
 flatten_any(Conds) ->
-    {any, lists:usort(flatten_any_(Conds))}.
+    {any, lists:usort(flatten_tag(any, Conds))}.
 
-flatten_any_([{any, Conds}|T]) ->
-    Conds ++ flatten_any_(T);
-flatten_any_([H|T]) ->
-    [H|flatten_any_(T)];
-flatten_any_([]) ->
+%% @private Common function for flattening "all" or "and" filters.
+flatten_tag(Tag, [{Tag, Conds}|T]) ->
+    Conds ++ flatten_tag(Tag, T);
+flatten_tag(Tag, [H|T]) ->
+    [H|flatten_tag(Tag, T)];
+flatten_tag(_Tag, []) ->
     [].
 
 %% @private Factor out required filters.
@@ -90,10 +138,10 @@ flatten_any_([]) ->
 required({any, [H|_]=Conds}) ->
     Init = ordsets:from_list(case H of {all, Init2} -> Init2; H -> [H] end),
     case required(Conds, Init) of
-        [] ->
+        nonefound ->
             Conds2 = [required(Cond) || Cond <- Conds],
             {any, Conds2};
-        [_|_]=Req ->
+        {found, Req} ->
             Conds2 = [required(deleteall(Cond, Req)) || Cond <- Conds],
             {all, [{all, Req}, {any, Conds2}]}
     end;
@@ -108,8 +156,10 @@ required([{any, _}|_]=Cond, Acc) ->
     erlang:error(badarg, [Cond, Acc]);
 required([H|T], Acc) ->
     required(T, ordsets:intersection(ordsets:from_list([H]), Acc));
-required([], Acc) ->
-    Acc.
+required([], [_|_]=Req) ->
+    {found, Req};
+required([], []) ->
+    nonefound.
 
 %% @private Factor our common filters.
 %%
@@ -147,8 +197,15 @@ common_([H|T], Seen) ->
     end;
 common_([], _Seen) ->
     nonefound.
-    
 
+%% @private Delete all occurances of constants.
+%%
+%% An "all" or "any" filter may be reduced to a constant outcome when all
+%% sub-filters has been factored out from the filter. In these cases the
+%% filter can be removed from the query.
+constants(Query) ->
+    delete(Query, {null, true}).
+    
 
 
 %% @private Delete all occurances of a filter.
@@ -190,13 +247,9 @@ is_valid(_Other) ->
 %% @private Assert that a term is a valid filter.
 %% If the term is a valid filter. The original term will be returned.
 %% If the term is not a valid filter. A `badarg' error is thrown.
-return_valid(Term) ->
-    case is_valid(Term) of
-        true -> Term;
-        false ->
-            io:format(user, "~w~n", [Term]),
-            erlang:error(badarg, [Term])
-    end.
+valid(Term) ->
+    is_valid(Term) orelse erlang:error(badarg, [Term]),
+    Term.
 
 
 -ifdef(TEST).
@@ -288,4 +341,35 @@ delete_from_any_test() ->
             glc:any([glc:eq(a, 1),glc:eq(b,2)]), [glc:eq(a, 1)])
     ).
 
+default_is_output_test_() ->
+    [?_assertEqual(output, glc_lib:onoutput(glc:lt(a, 1))),
+     ?_assertEqual(output, glc_lib:onoutput(glc:eq(a, 1))),
+     ?_assertEqual(output, glc_lib:onoutput(glc:gt(a, 1)))
+    ].
+
+-ifdef(PROPER).
+
+
+prop_reduce_returns() ->
+    ?FORALL(Query, glc_ops:op(),
+        returns(fun() -> glc_lib:reduce(Query) end)).
+
+reduce_returns_test() ->
+    ?assert(proper:quickcheck(prop_reduce_returns())).
+
+prop_matches_returns_boolean() ->
+    ?FORALL({Query, Event}, {glc_ops:op(), [{atom(), term()}]},
+        is_boolean(glc_lib:matches(Query, gre:make(Event, [list])))).
+
+matches_returns_boolean_test() ->
+    ?assert(proper:quickcheck(prop_matches_returns_boolean())).
+
+returns(Fun) ->
+    try Fun(),
+        true
+    catch _:_ ->
+        false
+    end.
+
+-endif.
 -endif.

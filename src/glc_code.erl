@@ -5,6 +5,8 @@
     compile/2
 ]).
 
+-define(erl, erl_syntax).
+
 -record(module, {
     'query' :: term(),
     tables :: [{atom(), ets:tid()}],
@@ -34,7 +36,7 @@ compile(Module, ModuleData) ->
 %% @private Generate an abstract dispatch module.
 -spec abstract_module(atom(), #module{}) -> {ok, forms, list()}.
 abstract_module(Module, Data) ->
-    Forms = [erl_syntax:revert(E) || E <- abstract_module_(Module, Data)],
+    Forms = [?erl:revert(E) || E <- abstract_module_(Module, Data)],
     case lists:keyfind(errors, 1, erl_syntax_lib:analyze_forms(Forms)) of
         false -> {ok, forms, Forms};
         {_, []} -> {ok, forms, Forms};
@@ -42,56 +44,56 @@ abstract_module(Module, Data) ->
     end.
 
 %% @private Generate an abstract dispatch module.
--spec abstract_module_(atom(), #module{}) -> [erl_syntax:syntaxTree()].
+-spec abstract_module_(atom(), #module{}) -> [?erl:syntaxTree()].
 abstract_module_(Module, #module{tables=Tables, qtree=Tree}=Data) ->
     {_, ParamsTable} = lists:keyfind(params, 1, Tables),
     AbstractMod = [
      %% -module(Module)
-     erl_syntax:attribute(erl_syntax:atom(module), [erl_syntax:atom(Module)]),
+     ?erl:attribute(?erl:atom(module), [?erl:atom(Module)]),
      %% -export([
-     erl_syntax:attribute(
-       erl_syntax:atom(export),
-       [erl_syntax:list([
+     ?erl:attribute(
+       ?erl:atom(export),
+       [?erl:list([
         %% info/1
-        erl_syntax:arity_qualifier(
-            erl_syntax:atom(info),
-            erl_syntax:integer(1)),
+        ?erl:arity_qualifier(
+            ?erl:atom(info),
+            ?erl:integer(1)),
         %% table/1
-        erl_syntax:arity_qualifier(
-            erl_syntax:atom(table),
-            erl_syntax:integer(1)),
+        ?erl:arity_qualifier(
+            ?erl:atom(table),
+            ?erl:integer(1)),
         %% handle/1
-        erl_syntax:arity_qualifier(
-            erl_syntax:atom(handle),
-            erl_syntax:integer(1))])]),
+        ?erl:arity_qualifier(
+            ?erl:atom(handle),
+            ?erl:integer(1))])]),
      %% ]).
      %% info(Name) -> Term.
-     erl_syntax:function(
-        erl_syntax:atom(info),
+     ?erl:function(
+        ?erl:atom(info),
         abstract_info(Data) ++
-        [erl_syntax:clause(
-            [erl_syntax:underscore()], none,
-                [abstract_apply(erlang, error, [erl_syntax:atom(badarg)])])]),
+        [?erl:clause(
+            [?erl:underscore()], none,
+                [abstract_apply(erlang, error, [?erl:atom(badarg)])])]),
      %% table(Name) -> ets:tid().
-     erl_syntax:function(
-        erl_syntax:atom(table),
+     ?erl:function(
+        ?erl:atom(table),
         abstract_tables(Tables) ++
-        [erl_syntax:clause(
-         [erl_syntax:underscore()], none,
-            [abstract_apply(erlang, error, [erl_syntax:atom(badarg)])])]),
+        [?erl:clause(
+         [?erl:underscore()], none,
+            [abstract_apply(erlang, error, [?erl:atom(badarg)])])]),
      %% handle(Event) - entry function
-     erl_syntax:function(
-       erl_syntax:atom(handle),
-       [erl_syntax:clause([erl_syntax:variable("Event")], none,
+     ?erl:function(
+       ?erl:atom(handle),
+       [?erl:clause([?erl:variable("Event")], none,
          [abstract_count(input),
-          erl_syntax:application(none,
-            erl_syntax:atom(handle_), [erl_syntax:variable("Event")])])]),
+          ?erl:application(none,
+            ?erl:atom(handle_), [?erl:variable("Event")])])]),
      %% input_(Node, App, Pid, Tags, Values) - filter roots
-     erl_syntax:function(
-        erl_syntax:atom(handle_),
-        [erl_syntax:clause([erl_syntax:variable("Event")], none,
+     ?erl:function(
+        ?erl:atom(handle_),
+        [?erl:clause([?erl:variable("Event")], none,
          abstract_filter(Tree, #state{
-            event=erl_syntax:variable("Event"),
+            event=?erl:variable("Event"),
             paramstab=ParamsTable}))])
     ],
     %% Transform Term -> Key to Key -> Term
@@ -102,14 +104,14 @@ abstract_module_(Module, #module{tables=Tables, qtree=Tree}=Data) ->
 
 %% @private Return the clauses of the table/1 function.
 abstract_tables(Tables) ->
-    [erl_syntax:clause(
-        [erl_syntax:abstract(K)], none,
-        [erl_syntax:abstract(V)])
+    [?erl:clause(
+        [?erl:abstract(K)], none,
+        [?erl:abstract(V)])
     || {K, V} <- Tables].
 
 %% @private Return the clauses of the info/1 function.
 abstract_info(#module{'query'=Query}) ->
-    [erl_syntax:clause([erl_syntax:abstract(K)], none, V)
+    [?erl:clause([?erl:abstract(K)], none, V)
         || {K, V} <- [
         {'query', abstract_query(Query)},
         {input, abstract_getcount(input)},
@@ -119,9 +121,9 @@ abstract_info(#module{'query'=Query}) ->
 
 %% @private Return the original query as an expression.
 abstract_query({with, _, _}) ->
-    [erl_syntax:abstract([])];
+    [?erl:abstract([])];
 abstract_query(Query) ->
-    [erl_syntax:abstract(Query)].
+    [?erl:abstract(Query)].
 
 
 %% @private Return a list of expressions to apply a filter.
@@ -163,15 +165,14 @@ abstract_filter_({'all', Conds}, OnMatch, OnNomatch, State) ->
 abstract_opfilter(Key, Opname, Value, OnMatch, OnNomatch, State) ->
     abstract_getkey(Key,
         _OnMatch=fun(#state{}=State2) ->
-            [erl_syntax:case_expr(
-                erl_syntax:application(
-                    erl_syntax:atom(erlang), erl_syntax:atom(Opname), [
-                        erl_syntax:variable(field_variable(Key)),
-                        erl_syntax:abstract(Value)
+            [?erl:case_expr(
+                abstract_apply(erlang, Opname, [
+                        ?erl:variable(field_variable(Key)),
+                        ?erl:abstract(Value)
                 ]),
-                [erl_syntax:clause([erl_syntax:atom(true)], none, 
+                [?erl:clause([?erl:atom(true)], none, 
                     OnMatch(State2)),
-                 erl_syntax:clause([erl_syntax:atom(false)], none,
+                 ?erl:clause([?erl:atom(false)], none,
                     OnNomatch(State2))])] end,
         _OnNomatch=fun(State2) -> OnNomatch(State2) end, State).
 
@@ -205,7 +206,7 @@ abstract_any([], _OnMatch, OnNomatch, State) ->
 abstract_with(Fun, State) when is_function(Fun, 1) ->
     abstract_getparam(Fun, fun(#state{event=Event, paramvars=Params}) ->
             {_, Fun2} = lists:keyfind(Fun, 1, Params),
-            [erl_syntax:application(none, Fun2, [Event])]
+            [?erl:application(none, Fun2, [Event])]
         end, State).
 
 %% @private Bind the value of a field to a variable.
@@ -226,17 +227,17 @@ abstract_getkey(Key, OnMatch, OnNomatch, #state{fields=Fields}=State) ->
         [syntaxTree()].
 abstract_getkey_(Key, OnMatch, OnNomatch, #state{
         event=Event, fields=Fields}=State) ->
-    [erl_syntax:case_expr(
-        abstract_apply(gre, find, [erl_syntax:atom(Key), Event]),
-        [erl_syntax:clause([
-            erl_syntax:tuple([
-                erl_syntax:atom(true),
-                erl_syntax:variable(field_variable(Key))])], none,
+    [?erl:case_expr(
+        abstract_apply(gre, find, [?erl:atom(Key), Event]),
+        [?erl:clause([
+            ?erl:tuple([
+                ?erl:atom(true),
+                ?erl:variable(field_variable(Key))])], none,
              OnMatch(State#state{
-                fields=[{Key, erl_syntax:variable(field_variable(Key))}
+                fields=[{Key, ?erl:variable(field_variable(Key))}
                     |Fields]})),
-         erl_syntax:clause([
-            erl_syntax:atom(false)], none,
+         ?erl:clause([
+            ?erl:atom(false)], none,
             OnNomatch(State))
         ]
     )].
@@ -264,12 +265,12 @@ abstract_getparam_(Term, OnBound, #state{paramstab=Table,
             ets:insert(Table, {Term, Key2}),
             Key2
     end,
-    [erl_syntax:match_expr(
+    [?erl:match_expr(
         param_variable(Key),
         abstract_apply(ets, lookup_element,
-            [abstract_apply(table, [erl_syntax:atom(params)]),
-             erl_syntax:abstract(Key),
-             erl_syntax:abstract(2)]))
+            [abstract_apply(table, [?erl:atom(params)]),
+             ?erl:abstract(Key),
+             ?erl:abstract(2)]))
     ] ++ OnBound(State#state{paramvars=[{Term, param_variable(Key)}|Params]}).
 
 %% @private Generate a variable name for the value of a field.
@@ -293,7 +294,7 @@ field_variable_([]) ->
 %% @private Generate a variable name for the value of a parameter.
 -spec param_variable(integer()) -> syntaxTree().
 param_variable(Key) ->
-    erl_syntax:variable("Param_" ++ integer_to_list(Key)).
+    ?erl:variable("Param_" ++ integer_to_list(Key)).
 
 %% @private Generate a list of field variable names.
 %% Walk the query tree and generate a safe variable name string for each field
@@ -313,9 +314,9 @@ param_variable(Key) ->
 -spec abstract_count(atom()) -> syntaxTree().
 abstract_count(Counter) ->
     abstract_apply(ets, update_counter,
-        [abstract_apply(table, [erl_syntax:atom(counters)]),
-         erl_syntax:abstract(Counter),
-         erl_syntax:abstract({2,1})]).
+        [abstract_apply(table, [?erl:atom(counters)]),
+         ?erl:abstract(Counter),
+         ?erl:abstract({2,1})]).
 
 
 %% @private Return an expression to get the value of a counter.
@@ -323,9 +324,9 @@ abstract_count(Counter) ->
 -spec abstract_getcount(atom()) -> [syntaxTree()].
 abstract_getcount(Counter) ->
     [abstract_apply(ets, lookup_element,
-        [abstract_apply(table, [erl_syntax:atom(counters)]),
-         erl_syntax:abstract(Counter),
-         erl_syntax:abstract(2)])].
+        [abstract_apply(table, [?erl:atom(counters)]),
+         ?erl:abstract(Counter),
+         ?erl:abstract(2)])].
 
 
 %% abstract code util functions
@@ -354,14 +355,9 @@ load_binary(Module, Binary) ->
 %% @private Apply an exported function.
 -spec abstract_apply(atom(), atom(), [syntaxTree()]) -> syntaxTree().
 abstract_apply(Module, Function, Arguments) ->
-    erl_syntax:application(
-        erl_syntax:atom(Module),
-        erl_syntax:atom(Function),
-        Arguments).
+    ?erl:application(?erl:atom(Module), ?erl:atom(Function), Arguments).
 
 %% @private Apply a module local function.
 -spec abstract_apply(atom(), [syntaxTree()]) -> syntaxTree().
 abstract_apply(Function, Arguments) ->
-    erl_syntax:application(
-        erl_syntax:atom(Function),
-        Arguments).
+    ?erl:application(?erl:atom(Function), Arguments).
